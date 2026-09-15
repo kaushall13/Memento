@@ -1,0 +1,62 @@
+memory:
+  write_interval_turns: 5
+  judge_window_turns: 10
+
+lifecycle:
+  decay_function: exponential
+  decay_lambda: 0.005
+  inactivity_expiry_days: 365
+
+retrieval:
+  candidate_count: 50
+  reranker_top_n: 20
+  final_memory_count: 10
+  rrf_k: 60
+
+scoring:
+  w_relevance: 1.0
+  w_confidence: 0.3
+  w_temporal: 0.5
+  w_recency: 0.2
+  w_decay: 0.3
+  confidence_explicit: 0.6
+  confidence_default: 0.4
+  merge_bump: 0.1
+  confidence_max: 1.0
+
+# models:
+#   provider: openrouter
+#   judge: thinkingmachines/inkling-small:free
+#   classifier: thinkingmachines/inkling-small:free
+#   understand: thinkingmachines/inkling-small:free
+#   embed: Qwen/Qwen3-Embedding-0.6B
+#   rerank: cross-encoder/ms-marco-MiniLM-L-6-v2
+#   embedding_dim: 1024
+
+# Alternative: Groq - comment out the block above and uncomment this one.
+models:
+ provider: groq
+ judge: openai/gpt-oss-20b
+ classifier: openai/gpt-oss-20b
+ understand: openai/gpt-oss-20b
+ embed: Qwen/Qwen3-Embedding-0.6B
+ rerank: cross-encoder/ms-marco-MiniLM-L-6-v2
+ embedding_dim: 1024
+
+# Alternative: local GGUF - comment out the active models block above and
+# uncomment this one. No API key needed.
+#models:
+#  provider: local
+#  judge: local
+#  classifier: local
+#  understand: local
+#  local_model: model/Qwen3.5-4B-UD-Q4_K_XL.gguf
+#  embed: Qwen/Qwen3-Embedding-0.6B
+#  rerank: cross-encoder/ms-marco-MiniLM-L-6-v2
+#  embedding_dim: 1024
+
+postgres:
+  dsn_env: POSTGRES_DSN
+
+redis:
+  url_env: REDIS_URL

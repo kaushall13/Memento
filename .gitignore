@@ -1,0 +1,48 @@
+# ---- secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# ---- tooling / caches ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+
+# ---- jupyter ----
+.ipynb_checkpoints/
+*.ipynb
+
+# ---- datasets / large data ----
+data/
+*.jsonl
+
+# ---- model weights ----
+model/
+*.gguf
+*.safetensors
+*.bin
+
+# ---- generated artifacts ----
+eda.html
+*.html
+architecture_diagram.png
+*.png
+
+# ---- editors / os ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
