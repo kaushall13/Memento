@@ -23,6 +23,8 @@ scoring:
   confidence_default: 0.4
   merge_bump: 0.1
   confidence_max: 1.0
+  merge_similarity_min: 0.88
+  merge_overlap_min: 0.75
 
 # models:
 #   provider: openrouter

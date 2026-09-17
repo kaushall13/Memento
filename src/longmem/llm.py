@@ -11,6 +11,7 @@ import json
 import math
 import re
 import time
+from datetime import datetime
 from typing import Dict, List, Protocol, Tuple
 
 from .schemas import (
@@ -18,11 +19,29 @@ from .schemas import (
     MemoryCandidate,
     MemoryType,
     Scope,
+    ScopeType,
     StructuredQuery,
     Turn,
 )
 
 _YEAR_RE = re.compile(r"(19|20)\d{2}")
+
+
+def cosine(a: List[float], b: List[float]) -> float:
+    """Cosine similarity between two vectors; 0.0 if either is degenerate.
+
+    Lives here because it is embedder math used by the write path (deciding
+    whether a candidate restates an existing memory). The eval suite keeps its
+    own copy on purpose: a metric that imports the system cannot judge it.
+    """
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 def year_heuristic(query: str) -> float:
@@ -62,7 +81,17 @@ def _format_turns(turns: List[Turn]) -> str:
 
 
 def build_judge_prompt(turns: List[Turn]) -> str:
-    """Pure judge prompt for the last-N turns."""
+    """Pure judge prompt for the last-N turns.
+
+    The rules are worded around one distinction that a window's *topic* does
+    not capture: whether the user revealed something durable about themselves.
+    A window can be mostly the assistant explaining general options and still
+    contain the user's own facts, stated as an aside — and those asides are
+    exactly what a long conversation later gets asked about. An earlier wording
+    ("general-knowledge questions do NOT count") was read as "this window is
+    instructional, so store nothing", and a durable location fact was lost with
+    it.
+    """
     convo = _format_turns(turns)
     return (
         "You are a memory judge. Decide whether the recent conversation "
@@ -75,11 +104,21 @@ def build_judge_prompt(turns: List[Turn]) -> str:
         "Rules:\n"
         "- Store distilled facts, preferences, and decisions "
         "(e.g. likes, home city, project choices).\n"
-        "- General-knowledge questions do NOT count as durable memory. "
-        "For example, a request such as "
-        "\"Can you provide the technical details of how a rocket operates "
-        "in space?\" asks for an explanation and carries no durable fact "
-        "about the user, so it must yield should_store=false.\n"
+        "- Judge the USER's own statements, not the topic of the window. A "
+        "window can be mostly the assistant explaining general options and "
+        "still contain a durable fact about the user.\n"
+        "- Details stated in passing count, even as an aside. For example, "
+        "\"I'm thinking of buying new sandals... by the way, I need to "
+        "organize my closet and get rid of my old sneakers in a shoe rack\" "
+        "states where the sneakers are kept and must be stored, even though "
+        "the window is mostly shopping advice.\n"
+        "- Only requests for general explanations with nothing about the user "
+        "count as nothing to store. For example, \"Can you provide the "
+        "technical details of how a rocket operates in space?\" carries no "
+        "durable fact about the user, so it yields should_store=false.\n"
+        "- When in doubt about a concrete detail the user stated about "
+        "themselves, store it rather than skipping it; a missed fact cannot "
+        "be recovered later, while an unnecessary memory only costs a slot.\n"
         "- confidence_basis must start with explicit when the user stated "
         "the fact directly (explicit_user_statement), otherwise describe "
         "the inference (inferred_from_context).\n"
@@ -103,7 +142,15 @@ def build_judge_prompt(turns: List[Turn]) -> str:
 def build_classify_prompt(
     candidate: MemoryCandidate, related: List[Memory]
 ) -> str:
-    """Pure classifier prompt over the active-head related set."""
+    """Pure classifier prompt over the active-head related set.
+
+    The rule that matters most is the boundary between *similar* and
+    *no_relation*. MERGE replaces nothing: it keeps the existing row's text and
+    raises its confidence, so calling two different assertions "similar" silently
+    deletes the newer one. Sharing a topic is therefore explicitly not enough —
+    the examples that pin this are the cobbler/shoe-rack pair (same subject,
+    different assertion) and the Italian-food pair (same assertion, reworded).
+    """
     lines: List[str] = [
         "You are a relationship classifier. Compare the new candidate memory "
         "against the existing memories and decide how they relate.",
@@ -119,10 +166,25 @@ def build_classify_prompt(
     lines.extend(
         [
             "",
+            "Rules:",
+            "- similar means the SAME fact, restated. Merging keeps the existing "
+            "wording, so anything the candidate says that the existing memory "
+            "does not say would be lost. Only choose similar when the candidate "
+            "adds nothing new.",
+            "- Sharing a topic is not enough. Two memories about the same "
+            "subject that assert different things are no_relation, not similar.",
+            "- contradiction means the candidate asserts something incompatible "
+            "with the existing memory (an update, a reversal, a denial), so the "
+            "old state must be kept as history.",
+            "",
             "Examples:",
-            '- Similar / duplicate: "User likes Italian food." vs '
+            '- Similar: "User likes Italian food." vs '
             '"User enjoys Italian restaurants." -> similar '
-            "(same fact, consolidate).",
+            "(same fact, reworded, nothing new).",
+            '- No relation (same topic, different assertion): "User plans to '
+            'drop old sneakers at a cobbler." vs "User keeps old sneakers in a '
+            'shoe rack." -> no_relation (both are about old sneakers, but each '
+            "states a different fact; merging would erase one).",
             '- Contradiction: "User prefers concise answers." vs '
             '"User prefers detailed explanations." -> contradiction '
             "(new fact replaces the old one as history, never overwrite).",
@@ -148,8 +210,49 @@ def _strip_fences(raw: str) -> str:
     return text
 
 
+def _coerce_enum(value, enum_cls, default):
+    """Map an unusable enum value onto the documented default.
+
+    Catches: the silent loss this was written for. A small model emitted
+    ``"type": ""`` for an otherwise perfect memory, the whole candidate failed
+    validation, and the write path turned that into DISCARD — the fact was gone
+    forever with no trace of why. Content is the valuable part of a candidate;
+    an unreadable category is not worth losing it over.
+    """
+    if isinstance(value, enum_cls):
+        return value
+    if isinstance(value, str):
+        try:
+            return enum_cls(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _coerce_datetime(value):
+    """Return a parsed datetime, or None for anything unusable.
+
+    Same reasoning as ``_coerce_enum``: ``valid_from`` is optional, so a
+    malformed date should drop the field, not the memory that carries it.
+    """
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
 def parse_judge_json(raw: str) -> MemoryCandidate:
-    """Parse LLM judge output into a MemoryCandidate or raise ValueError."""
+    """Parse LLM judge output into a MemoryCandidate or raise ValueError.
+
+    Raises only when the reply is not JSON, is not an object, or is missing
+    ``should_store`` / contradicts it with empty content. Optional fields with
+    unusable values are coerced to their defaults instead, so one bad enum
+    cannot discard an otherwise valid memory.
+    """
     try:
         data = json.loads(_strip_fences(raw))
     except json.JSONDecodeError as exc:
@@ -172,6 +275,23 @@ def parse_judge_json(raw: str) -> MemoryCandidate:
         data["scope"] = scope
     else:
         data.pop("scope_id", None)
+
+    data["type"] = _coerce_enum(data.get("type"), MemoryType, MemoryType.semantic)
+    scope = data.get("scope")
+    if isinstance(scope, dict):
+        scope = dict(scope)
+        scope["type"] = _coerce_enum(
+            scope.get("type"), ScopeType, ScopeType.user
+        )
+        data["scope"] = scope
+    else:
+        data["scope"] = {"type": ScopeType.user}
+    if "valid_from" in data:
+        data["valid_from"] = _coerce_datetime(data["valid_from"])
+    if not isinstance(data.get("confidence_basis", ""), str):
+        data["confidence_basis"] = ""
+    if data.get("content") is None:
+        data["content"] = ""
     try:
         return MemoryCandidate(**data)
     except Exception as exc:

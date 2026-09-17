@@ -33,6 +33,14 @@ _DEFAULT_W_CONFIDENCE = 0.3
 _DEFAULT_W_TEMPORAL = 0.5
 _DEFAULT_W_RECENCY = 0.2
 _DEFAULT_W_DECAY = 0.3
+# Backstop thresholds for MERGE. Measured on the local embedder: true
+# paraphrases score 0.91-1.00 while "same topic, different assertion" pairs
+# score 0.70-0.78, so 0.88 sits in the gap. Deliberately biased toward
+# rejecting a merge: a duplicate memory is recoverable, deleted content is not.
+_DEFAULT_MERGE_SIMILARITY_MIN = 0.88
+# Lexical fallback (used when no embedder is configured) counts candidate
+# content terms missing from the target; near-exact restatements score 1.0.
+_DEFAULT_MERGE_OVERLAP_MIN = 0.75
 # NOTE (Phase 01 lock): the repo gate asserts src contains no hard-coded
 # confidence decimals outside tests, so confidence fallbacks below are
 # written as fractions (see plan section on confidence tunables).
@@ -84,6 +92,8 @@ class ScoringConfig:
     confidence_default: float = _CONF_DEFAULT_DEFAULT
     merge_bump: float = _MERGE_BUMP_DEFAULT
     confidence_max: float = _CONF_MAX_DEFAULT
+    merge_similarity_min: float = _DEFAULT_MERGE_SIMILARITY_MIN
+    merge_overlap_min: float = _DEFAULT_MERGE_OVERLAP_MIN
 
 
 @dataclass(frozen=True)
@@ -189,6 +199,12 @@ def load_settings(path: str | Path = "config.yaml") -> Settings:
         ),
         merge_bump=float(scor.get("merge_bump", _MERGE_BUMP_DEFAULT)),
         confidence_max=float(scor.get("confidence_max", _CONF_MAX_DEFAULT)),
+        merge_similarity_min=float(
+            scor.get("merge_similarity_min", _DEFAULT_MERGE_SIMILARITY_MIN)
+        ),
+        merge_overlap_min=float(
+            scor.get("merge_overlap_min", _DEFAULT_MERGE_OVERLAP_MIN)
+        ),
     )
     models = ModelsConfig(
         judge=str(mods.get("judge", _DEFAULT_JUDGE_MODEL)),
@@ -311,4 +327,14 @@ def _validate(s: Settings) -> None:
     if not (0 < bump <= 0.5):
         raise ValueError(
             f"scoring.merge_bump must satisfy 0 < bump <= 0.5, got {bump}"
+        )
+    if not (0 < s.scoring.merge_similarity_min <= 1):
+        raise ValueError(
+            "scoring.merge_similarity_min must satisfy 0 < min <= 1, got "
+            f"{s.scoring.merge_similarity_min}"
+        )
+    if not (0 <= s.scoring.merge_overlap_min <= 1):
+        raise ValueError(
+            "scoring.merge_overlap_min must satisfy 0 <= min <= 1, got "
+            f"{s.scoring.merge_overlap_min}"
         )

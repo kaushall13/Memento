@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import List
 
 from .config import Settings
-from .llm import Embedder, LLMClient
+from .llm import Embedder, LLMClient, cosine
 from .schemas import (
     Memory,
     MemoryCandidate,
@@ -100,6 +101,13 @@ def consolidate(
     provenance; a repeated merge from the same session is idempotent on
     sources (first row kept) so long sessions hitting two N-boundaries
     cannot violate the source PK.
+
+    Because MERGE never writes the candidate's wording, a "similar" verdict is
+    only honoured when the candidate actually restates the target
+    (``restatement_evidence``). If the classifier is wrong about that — two
+    different assertions about the same subject — the merge is vetoed and the
+    candidate is created as its own memory instead, so no information is lost
+    to a mislabel. The veto is logged as its own event.
     """
     if not candidate.should_store:
         return "DISCARD"
@@ -134,13 +142,30 @@ def consolidate(
 
     if relationship == "similar" and related_id in by_id:
         target = by_id[related_id]
-        merged_confidence = min(
-            settings.scoring.confidence_max,
-            target.confidence + settings.scoring.merge_bump,
+        evidence = restatement_evidence(candidate.content, target, embedder, settings)
+        if evidence["is_restatement"]:
+            merged_confidence = min(
+                settings.scoring.confidence_max,
+                target.confidence + settings.scoring.merge_bump,
+            )
+            merged_evidence = source.model_copy(
+                update={"memory_id": target.memory_id}
+            )
+            durable.merge(target.memory_id, merged_evidence, merged_confidence)
+            return "MERGE"
+        print(
+            json.dumps(
+                {
+                    "event": "merge_vetoed",
+                    "session_id": session_id,
+                    "target_id": target.memory_id,
+                    "candidate": candidate.content[:120],
+                    "rule": evidence["rule"],
+                    "score": round(float(evidence["score"]), 4),
+                    "threshold": evidence["threshold"],
+                }
+            )
         )
-        evidence = source.model_copy(update={"memory_id": target.memory_id})
-        durable.merge(target.memory_id, evidence, merged_confidence)
-        return "MERGE"
 
     if relationship == "contradiction" and related_id in by_id:
         if embedder is not None:
@@ -183,6 +208,78 @@ def format_formation_event(
     )
 
 
+_STOPWORDS = frozenset(
+    {
+        "the", "a", "an", "and", "or", "of", "to", "in", "on", "at", "for",
+        "with", "by", "is", "are", "was", "were", "be", "been", "it", "its",
+        "this", "that", "these", "those", "i", "my", "me", "you", "your",
+        "their", "they", "he", "she", "we", "our", "as", "from", "but", "if",
+        "then", "than", "so", "do", "does", "did", "has", "have", "had",
+        "not", "no", "will", "would", "can", "could", "about", "into", "over",
+    }
+)
+_TERM_RE = re.compile(r"[a-z0-9]+")
+
+
+def content_terms(text: str) -> set:
+    """Significant words in a memory, used by the lexical fallback rule."""
+    return {
+        term for term in _TERM_RE.findall((text or "").lower())
+        if term not in _STOPWORDS
+    }
+
+
+def lexical_containment(candidate: str, target: str) -> float:
+    """Share of the candidate's content terms already present in the target.
+
+    Catches the same failure as the embedding rule but needs no model: 1.0
+    means every word the candidate says is already in the target (a restatement),
+    low means it is asserting something the target does not.
+    """
+    terms = content_terms(candidate)
+    if not terms:
+        return 1.0
+    return len(terms & content_terms(target)) / len(terms)
+
+
+def restatement_evidence(
+    candidate_content: str,
+    target: "Memory",
+    embedder: Embedder | None,
+    settings: Settings,
+) -> dict:
+    """Decide whether MERGE would preserve everything the candidate says.
+    MERGE keeps the target row's wording and only raises its confidence, so a
+    candidate that is *not* a restatement loses its content silently. The
+    classifier is an LLM and can label same-topic-different-assertion pairs as
+    ``similar``; this is the deterministic check that keeps that mistake from
+    deleting information.
+
+    Embedding cosine when an embedder is available (measured: paraphrases
+    0.91-1.00, different assertions about the same subject 0.70-0.78), lexical
+    containment otherwise. Both are deliberately biased toward refusing the
+    merge — a duplicate memory is recoverable, deleted content is not.
+    """
+    scores = settings.scoring
+    if embedder is not None:
+        vectors = embedder.embed([candidate_content, target.content])
+        if len(vectors) == 2:
+            similarity = cosine(vectors[0], vectors[1])
+            return {
+                "rule": "embedding",
+                "score": similarity,
+                "threshold": scores.merge_similarity_min,
+                "is_restatement": similarity >= scores.merge_similarity_min,
+            }
+    overlap = lexical_containment(candidate_content, target.content)
+    return {
+        "rule": "lexical",
+        "score": overlap,
+        "threshold": scores.merge_overlap_min,
+        "is_restatement": overlap >= scores.merge_overlap_min,
+    }
+
+
 def recent_turns(turns: List[Turn], settings: Settings) -> List[Turn]:
     """Trailing window the judge actually sees (bounded prompts).
 
@@ -204,7 +301,11 @@ def maybe_judge_and_consolidate(
 ) -> Operation | None:
     """Run judge+consolidate on N-turn boundaries; None off-boundary.
 
-    An unreadable judge verdict discards (store untouched, never crash).
+    An unreadable judge verdict returns ERROR (store untouched, never crash).
+    That is deliberately distinct from DISCARD: "the judge said nothing here is
+    worth keeping" and "the judge could not be read" are different events, and
+    collapsing them hid real losses behind what looked like a decision.
+
     Every boundary logs one JSON line with the distilled candidate, so a
     later question can be traced to exactly what the judge saw — without
     re-running paid calls. The judge sees the trailing window, never the
@@ -215,8 +316,8 @@ def maybe_judge_and_consolidate(
     try:
         candidate = llm.judge(recent_turns(turns, settings))
     except Exception as exc:
-        print(format_formation_event(session_id, "DISCARD", None, exc))
-        return "DISCARD"
+        print(format_formation_event(session_id, "ERROR", None, exc))
+        return "ERROR"
     op = consolidate(
         candidate,
         session_id,

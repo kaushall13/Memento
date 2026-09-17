@@ -141,4 +141,4 @@ class Turn(BaseModel):
     content: str
 
 
-Operation = Literal["CREATE", "MERGE", "SUPERSEDE", "DISCARD"]
+Operation = Literal["CREATE", "MERGE", "SUPERSEDE", "DISCARD", "ERROR"]
