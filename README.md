@@ -259,16 +259,3 @@ config.yaml      every tunable, validated and frozen at load
 - **LLM judges, code decides.** The model produces candidates and relation
   labels; the pipeline computes confidence, versions, and history.
 - **Metrics judge from outside.** `evals/` never imports `src/`.
-
-## Limitations
-
-- Absolute quality is unmeasured at scale: one question per engine so far.
-- The merge backstop's precision/duplicate trade-off needs checking across many
-  questions, not one.
-- Groq's free tier cannot run LongMemEval-M-100 (≈1 question/day/key); local is the viable
-  path at ~49 hours for the full set.
-- Postgres and Redis adapters are exercised by integration tests when the
-  containers are up, but the full write-and-read loop has not been run at
-  conversational scale on Postgres.
-- No cost table for hosted models is bundled; token usage is logged per call and
-  pricing is left to the caller.
