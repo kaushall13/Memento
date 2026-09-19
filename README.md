@@ -19,7 +19,7 @@ The Python package is `longmem`; Memento is the project.
 | Core library (`src/longmem/`) | Write path, read path, lifecycle, Postgres/Redis adapters, service — complete |
 | Test suite | 178 passing, 4 skipped (integration tests skip without backends or keys) |
 | Evaluation metrics (`evals/`) | Complete: 5 axes, 33 offline tests |
-| Experiments (`try/`) | One experiment run end to end; results in `try/RESULTS.md` |
+| Experiments | One experiment run end to end (EXP-01 — LongMemEval-M-100); see Evaluation |
 | Absolute quality numbers | Early — one question measured per engine, not a benchmark score |
 
 ## The approach
@@ -147,9 +147,8 @@ that can come back negative.
 ### Experiment EXP-01 — LongMemEval-M-100
 
 **Name.** *EXP-01 · LongMemEval-M-100* — the 100-question stratified slice of
-LongMemEval-M, built to make the benchmark runnable on free tiers and CPUs. Code
-and record live in `try/`, a sandbox kept out of version control on purpose; the
-metric definitions it uses are the real ones in `evals/`.
+LongMemEval-M, built to make the benchmark runnable on free tiers and CPUs.
+The metric definitions it uses are the real ones in `evals/`.
 
 **Why a smaller set.** LongMemEval-M pairs each question with a ~482-session
 haystack: 500 questions cost roughly 584,000 judge calls, which is not runnable
@@ -158,12 +157,12 @@ question distribution and cuts the haystack.
 
 **What was built.**
 
-| Tool | Purpose |
+| Component | Purpose |
 |---|---|
-| `try/build_cheap_set.py` | Builds LongMemEval-M-100: 100 questions stratified across all six question types (seed 0), each haystack reduced to the gold sessions plus 15 hard distractors ranked by lexical overlap with the question, then temporal proximity, then session length. 1,691 sessions / 20,139 turns / ~5,000 judge calls — ~117× cheaper than the full set. Preserves the original JSON keys and adds a `_try` provenance block plus a sidecar `meta.json` (seed, quota, source hash). |
-| `try/llm_pool.py` | Multi-key client for free tiers: rotates keys, honours the provider's own "try again in Xs" hint, paces against a token-per-minute budget, falls back lazily to a local GGUF, and reports per-key usage and failures. |
-| `try/run_cheap.py` | Per-question runner: fresh stores, ingest in date order, snapshot the store at every write boundary, answer with *and* without memory for the paired lift, optional cross-question abstention probe, resume support. |
-| `try/config.cheap.yaml` | 5-turn judge windows and the LLM reranker bypassed — the two measured cost drivers. |
+| Dataset builder | Builds LongMemEval-M-100: 100 questions stratified across all six question types (seed 0), each haystack reduced to the gold sessions plus 15 hard distractors ranked by lexical overlap with the question, then temporal proximity, then session length. 1,691 sessions / 20,139 turns / ~5,000 judge calls — ~117× cheaper than the full set. Preserves the original JSON keys and adds a `_try` provenance block plus a sidecar `meta.json` (seed, quota, source hash). |
+| Multi-key LLM client | For free tiers: rotates keys, honours the provider's own "try again in Xs" hint, paces against a token-per-minute budget, falls back lazily to a local GGUF, and reports per-key usage and failures. |
+| Per-question runner | Fresh stores, ingest in date order, snapshot the store at every write boundary, answer with *and* without memory for the paired lift, optional cross-question abstention probe, resume support. |
+| Cheap configuration | 5-turn judge windows and the LLM reranker bypassed — the two measured cost drivers. |
 
 **What it measured.**
 
@@ -224,10 +223,6 @@ docker compose up -d          # pgvector + redis
 
 # query the durable store
 python scripts/ask.py --query "where do I keep my old sneakers?"
-
-# rebuild the LongMemEval-M-100 slice, then run one question locally
-python try/build_cheap_set.py --limit 100 --distractors 15 --seed 0
-python try/run_cheap.py --llm local --limit 1
 ```
 
 Chat provider and model ids are set in `config.yaml`; API keys live in `.env`
@@ -243,8 +238,6 @@ evals/           evaluation metrics (retrieval, answer, temporal, usefulness,
                  consolidation), independent of the library
 tests/           offline test suite; integration tests are marker-gated
 scripts/         thin CLIs over the real backends
-try/             sandbox: LongMemEval-M-100 experiment builder, key pool, runner,
-                 results (ignored by git)
 plans/           the phase contracts the implementation was built against
 config.yaml      every tunable, validated and frozen at load
 ```
